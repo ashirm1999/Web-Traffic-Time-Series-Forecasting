@@ -8,7 +8,6 @@ Flow of Project
   <li>Modeling</li>
   <ol style="list-style-type:number">
   <li>ARIMA</li>
-  <li>SARIMA</li>
   <li>XGBoost</li>
   <li>Prophet Model</li>
   <li>LSTM</li>
