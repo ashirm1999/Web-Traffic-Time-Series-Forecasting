@@ -1,0 +1,772 @@
+---
+title: "EDA_Final"
+author: "Mudit Bhartia"
+date: "12/5/2021"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE,
+                      cache = FALSE,
+                      fig.align = 'center',
+                      warning = FALSE,
+                      message = FALSE)
+
+```
+
+```{r }
+
+library('ggplot2') 
+library('ggthemes') 
+library('ggrepel')
+library('scales') 
+library('grid') 
+library('gridExtra')
+library('data.table') 
+library('dplyr') 
+library('readr') 
+library('tibble') 
+library('tidyr') 
+library('lazyeval') 
+library('broom') 
+library('stringr') 
+library('purrr') 
+library('forcats') 
+library('lubridate') 
+
+
+
+
+```
+
+## Loading Data
+
+
+
+```{r}
+
+train <- read_csv('/Users/muditbhartia/Desktop/CS5110/IDMP Project /dataset/web-traffic-time-series-forecasting/train_1.csv')
+
+key <- read_csv('/Users/muditbhartia/Desktop/CS5110/IDMP Project /dataset/web-traffic-time-series-forecasting/key_1.csv')
+
+#train_2 <- read_csv('/Users/muditbhartia/Desktop/CS5110/IDMP Project /dataset/web-traffic-time-series-forecasting/train_2.csv')
+
+head(train,5)
+
+
+```
+
+
+
+
+
+## File structure and content
+
+* Dimensions of the train data set:
+
+
+```{r}
+
+c(ncol(train),nrow(train))
+train %>% colnames() %>% head(5)
+train %>% select(Page) %>% head(5)
+
+```
+
+The data is originally structured so that 550 dates refer to a column each 
+and the 145k article nanes are stored in the additional Page column
+
+
+* Dimensions of the key data set:
+
+```{r}
+
+glimpse(key)
+
+
+```
+
+The key data contains a unique alpha-numerical ID for each Page and Date combination, which is the reason for the relatively large file size.
+
+
+* Missing Values
+
+```{r}
+
+sum(is.na(train))/(ncol(train)*nrow(train))
+
+
+```
+
+There are about 8% of missing values in this data set. These missing values 
+exists because there can be certain articles which were not existed in the 
+Wikipedia Dataset and thus no information is present. 
+
+We have to mutate the dataset by removing such articles with missing values.
+
+
+## Data transformation
+
+To make the training data easier to handle we split it into two part: 
+
+* train_pages : The article information (from the Page column) 
+* train_dates: the time series data from the date columns. 
+
+To tidy tidy the article information we separate the article information into data from wikipedia, wikimedia, and media_wiki due to the different formatting of the Page names. 
+After that, we rejoin all article information into a common data set (train_pages).
+
+```{r}
+
+train_dates <- train %>% select(-Page)
+
+foo <- train %>% select(Page) %>% rownames_to_column()
+mediawiki <- foo %>% filter(str_detect(Page, "mediawiki"))
+wikimedia <- foo %>% filter(str_detect(Page, "wikimedia"))
+wikipedia <- foo %>% filter(str_detect(Page, "wikipedia")) %>% 
+  filter(!str_detect(Page, "wikimedia")) %>%
+  filter(!str_detect(Page, "mediawiki"))
+
+wikipedia <- wikipedia %>%
+  separate(Page, into = c("foo", "bar"), sep = ".wikipedia.org_") %>%
+  separate(foo, into = c("article", "language"), sep = -3) %>%
+  separate(bar, into = c("access", "agent"), sep = "_") %>%
+  mutate(language = str_sub(language,2,3))
+
+wikimedia <- wikimedia %>%
+  separate(Page, into = c("article", "bar"), sep = "_commons.wikimedia.org_") %>%
+  separate(bar, into = c("access", "agent"), sep = "_") %>%
+  add_column(language = "wikmed")
+
+mediawiki <- mediawiki %>%
+  separate(Page, into = c("article", "bar"), sep = "_www.mediawiki.org_") %>%
+  separate(bar, into = c("access", "agent"), sep = "_") %>%
+  add_column(language = "medwik")
+
+train_pages <- wikipedia %>%
+  full_join(wikimedia, by = c("rowname", "article", "language", "access", "agent")) %>%
+  full_join(mediawiki, by = c("rowname", "article", "language", "access", "agent"))
+
+sample_n(train_pages, size = 10)
+#head(train_dates,5)
+
+```
+
+
+After having Transformed the dataset to access information such as article name, access and agent , we can filter our dataset to search for a particular article.
+
+```{r}
+
+train_pages %>% filter(str_detect(article, "Pablo_Escobar")) %>%
+  filter(access == "all-access") %>%
+  filter(agent == "all-agents")
+
+```
+
+## Time series extraction
+
+In order to plot the time series data we create a function that allows
+us to extract the time series data for a specified row number(article). 
+(The extract_time_series_nrm function is to facilitate the comparison between multiple time series curves, to correct for large differences in view count.)
+
+
+```{r}
+
+extract_time_series <- function(rownr){
+  train_dates %>%
+    rownames_to_column %>% 
+    filter(rowname == as.character(rownr)) %>% 
+    gather(dates, value, -rowname) %>% 
+    spread(rowname, value) %>%
+    mutate(dates = ymd(dates)) %>% 
+    rename(views = as.character(rownr))
+}
+
+extract_time_series_nrm <- function(rownr){
+  train_dates %>%
+    rownames_to_column %>% 
+    filter(rowname == as.character(rownr)) %>% 
+    gather(dates, value, -rowname) %>% 
+    spread(rowname, value) %>%
+    mutate(dates = ymd(dates)) %>% 
+    rename(views = as.character(rownr)) %>% 
+    mutate(views = views/mean(views))
+}
+
+
+
+```
+
+
+* To create the time series plot for a particular article from a dataset, we created functions to plot the time series data for a particular article.
+
+* plot_time_series() function to plot the time series data for a particular article: (view count) vs dates (all dates)
+
+* plot_time_series_log() function to plot the time series data for a particular article: log (view count) vs dates (all dates)
+
+* plot_time_series_zoom() function to plot the time series data for a particular article:  (view count) vs dates (2 months)
+
+```{r}
+
+plot_time_series <- function(rownr){
+  art <- train_pages %>% filter(rowname == rownr) %>% .$article
+  lang <- train_pages %>% filter(rowname == rownr) %>% .$language
+  acc <- train_pages %>% filter(rowname == rownr) %>% .$access
+  extract_time_series(rownr) %>%
+    ggplot(aes(dates, views)) +
+    geom_line() +
+    geom_smooth(method = "loess", color = "blue", span = 1/6) +
+    labs(title = str_c(art, " - ", lang, " - ", acc))
+}
+
+plot_time_series_log <- function(rownr){
+  art <- train_pages %>% filter(rowname == rownr) %>% .$article
+  lang <- train_pages %>% filter(rowname == rownr) %>% .$language
+  acc <- train_pages %>% filter(rowname == rownr) %>% .$access
+  extract_time_series_nrm(rownr) %>%
+    ggplot(aes(dates, views)) +
+    geom_line() +
+    geom_smooth(method = "loess", color = "blue", span = 1/6) +
+    labs(title = str_c(art, " - ", lang, " - ", acc)) +
+    scale_y_log10() + labs(y = "Log View Count")
+}
+
+plot_time_series_zoom <- function(rownr, start, end){
+  art <- train_pages %>% filter(rowname == rownr) %>% .$article
+  lang <- train_pages %>% filter(rowname == rownr) %>% .$language
+  acc <- train_pages %>% filter(rowname == rownr) %>% .$access
+  extract_time_series(rownr) %>%
+    filter(dates > ymd(start) & dates <= ymd(end)) %>%
+    ggplot(aes(dates, views)) +
+    geom_line() +
+    geom_smooth(method = "loess", color = "blue", span = 1/6) +
+    coord_cartesian(xlim = ymd(c(start,end))) +  
+    labs(title = str_c(art, " - ", lang, " - ", acc))
+}
+
+```
+
+
+```{r}
+plot_time_series(38815)
+
+```
+
+
+Using extract_time_series() we define a function that
+re-connects the Page/Article information to the corresponding time series and plots this curve according to our specification on article name, access type, and agent for all the available languages:
+
+
+
+```{r}
+
+plot_time_series_name <- function(art, acc, ag){
+
+  pick <- train_pages %>% filter(str_detect(article, art)) %>%
+    filter(access == acc) %>%
+    filter(agent == ag)
+  pick_nr <- pick %>% .$rowname
+  pick_loc <- pick %>% .$language
+
+  tdat <- extract_time_series(pick_nr[1]) %>%
+    mutate(lang = pick_loc[1])
+
+  for (i in seq(2,length(pick))){
+    foo <- extract_time_series(pick_nr[i]) %>%
+    mutate(lang = pick_loc[i])
+    tdat <- bind_rows(tdat,foo)
+  }
+
+  plt <- tdat %>%
+    ggplot(aes(dates, views, color = lang)) +
+    geom_line() + 
+    labs(title = str_c(art, "  -  ", acc, "  -  ", ag))
+
+  print(plt)
+}
+
+plot_time_series_name_nrm <- function(art, acc, ag){
+
+  pick <- train_pages %>% filter(str_detect(article, art)) %>%
+    filter(access == acc) %>%
+    filter(agent == ag)
+  pick_nr <- pick %>% .$rowname
+  pick_loc <- pick %>% .$language
+
+  tdat <- extract_time_series_nrm(pick_nr[1]) %>%
+    mutate(lang = pick_loc[1])
+
+  for (i in seq(2,length(pick))){
+    foo <- extract_time_series_nrm(pick_nr[i]) %>%
+    mutate(lang = pick_loc[i])
+    tdat <- bind_rows(tdat,foo)
+  }
+
+  plt <- tdat %>%
+    ggplot(aes(dates, views, color = lang)) +
+    geom_line() + 
+    labs(title = str_c(art, "  -  ", acc, "  -  ", ag)) +
+    scale_y_log10() + labs(y = "Log View Count")
+
+  print(plt)
+}
+
+
+```
+
+
+* Using the plot_time_series_name(), we plot the time series plot for the article names= "Pablo_Escobar" with access= "all-access" and agent = "all-agents"
+
+```{r}
+
+plot_time_series_name("Pablo_Escobar", "all-access", "all-agents")
+
+```
+We can observe that this particular article has comparatively more number of views in English languages as compared to others. There is also a spike in the view count during October 2015 and October 2016.
+
+
+## Time Series Parameter Extraction
+
+In the next step we will have a more general look at the population parameters of our training time series data. Also here, we will start with the wikipedia data. The idea behind this approach is to explore the parameter space of the time series information along certain key metrics and to identify extreme observations that could break our forecasting strategies. We want to explore such articles/ pages to find if there can be any insights/trends that we can observe which might help in our modelling.
+
+### Data Overview
+
+Distribution of the Parameter space: 
+
+```{r}
+
+p1 <- train_pages %>% 
+  ggplot(aes(language, fill = language)) + geom_bar() + theme(legend.position = "none")
+p2 <- train_pages %>% 
+  ggplot(aes(agent)) + geom_bar(fill = "black")
+p3 <- train_pages %>% 
+  ggplot(aes(access)) + geom_bar(fill = "brown")
+
+
+layout <- matrix(c(1,2,3,3),2,2,byrow=TRUE)
+grid.arrange(p1, p2, p3,top=textGrob("Distribution of Parameter Space"))
+
+```
+### Insights
+
+* There are a total of 7 languages observed from the wikipedia dataset: English,French, Japanese, Russian, German,Spanish, and Chinese. 
+* Mobile sites are slightly more frequent than desktop ones.
+
+
+
+## Building Time Series Parameters
+
+Building time series parameter from the dataset:
+
+* Minimum View count
+* Maximum View count
+* Mean View count
+* Median View count
+* Slope
+
+
+```{r}
+
+time_series_params <- function(rownr){
+  foo <- train_dates %>%
+    filter_((interp(~x == row_number(), .values = list(x = rownr)))) %>%
+    rownames_to_column %>% 
+    gather(dates, value, -rowname) %>% 
+    spread(rowname, value) %>%
+    mutate(dates = ymd(dates),
+          views = as.integer(`1`))
+
+  slope <- ifelse(is.na(mean(foo$views)),0,summary(lm(views ~ dates, data = foo))$coef[2])
+  slope_error <- ifelse(is.na(mean(foo$views)),0,summary(lm(views ~ dates, data = foo))$coef[4])
+
+  bar <- tibble(
+    rowname = rownr,
+    min_view = min(foo$views),
+    max_view = max(foo$views),
+    avg_view = mean(foo$views),
+    med_view = median(foo$views),
+    sd_view = sd(foo$views),
+    slope = slope/slope_error
+  )
+
+  return(bar)
+}
+
+
+```
+
+
+
+```{r}
+
+set.seed(1234)
+# Running the program on a sample of 6000 data points
+foo <- sample_n(train_pages, 6000)
+#foo <- train_pages
+rows <- foo$rowname
+pcols <- c("rowname", "min_view", "max_view", "avg_view", "med_view", "sd_view", "slope")
+
+parameters <- time_series_params(rows[1])
+
+```
+
+
+```{r}
+for (i in seq(2,nrow(foo))){
+  parameters <- full_join(parameters, time_series_params(rows[i]), by = pcols)
+}
+
+parameters <- parameters %>%
+  filter(!is.na(avg_view)) %>%
+  mutate(rowname = as.character(rowname))
+
+```
+
+
+
+### Overview visualisations
+
+
+After calculating the time series parameters such as mean, standard deviation, slope, we explore our dataset is distributed based on these computed parameters.
+
+Histogram of our main parameters
+
+
+```{r}
+p1 <- parameters %>% 
+  ggplot(aes(avg_view)) + geom_histogram(fill = "black", bins = 100) + scale_x_log10()
+p2 <- parameters %>% 
+  ggplot(aes(max_view)) + geom_histogram(fill = "black", bins =100) + scale_x_log10()
+p3 <- parameters %>% 
+  ggplot(aes(sd_view/avg_view)) + geom_histogram(fill = "black", bins = 100) + scale_x_log10()
+p4 <- parameters %>% 
+  ggplot(aes(slope)) + geom_histogram(fill = "black", bins = 100) + 
+  scale_x_continuous(limits = c(-25,25))
+
+layout <- matrix(c(1,2,3,4),2,2,byrow=TRUE)
+grid.arrange(p1, p2, p3, p4,top=textGrob("Distribution of Time Series Parameter Space"))
+```
+
+
+### Insights
+
+* The distribution of average views is clearly bimodal (2 peaks), with peaks around 10 and 200-300 views. Similar can be said for the number of maximum 
+views, although here the first peak (around 200) is curiuosly narrow. The 
+second peak is centred above 10,000.
+
+* The distribution of standard deviations (divided by the mean) is slightly skewed towards higher values with larger numbers of spikes or stronger variability 
+trends. Those will be the observations that are more challenging to 
+forecast.
+
+* The slope distribution is reasonably symmetric and centered notably above zero.
+
+
+Spiting the data by language to focus on the densities:
+
+```{r}
+
+par_page <- left_join(parameters,train_pages, by = "rowname")
+p1 <- par_page %>% 
+  ggplot(aes(avg_view, fill = language)) +
+  geom_density(position = "stack") +
+  scale_x_log10(limits = c(1,1e4)) +
+  theme(legend.position = "none")
+
+p2 <- par_page %>% 
+  ggplot(aes(max_view, fill = language)) +
+  geom_density(position = "stack") +
+  scale_x_log10(limits = c(10,1e6)) +
+  theme(legend.position = "none")
+
+p3 <- par_page %>%
+  ggplot(aes(sd_view, fill = language)) +
+  geom_density(position = "stack") +
+  scale_x_log10(limits = c(1,1e5)) +
+  theme(legend.position = "none")
+
+p4 <- par_page %>% 
+  ggplot(aes(slope, fill = language)) +
+  geom_density(position = "stack") + 
+  scale_x_continuous(limits = c(-10,10))
+
+layout <- matrix(c(1,2,3,4),2,2,byrow=TRUE)
+grid.arrange(p1, p2, p3, p4,top=textGrob("Distribution of Parameter space wrt Language"))
+
+```
+
+
+### Insights
+
+* The chinese pages (zh, in pink) are slightly but notably different from 
+the rest. The have lower mean and max views and also less variation. Their 
+slope distribution is broader, but also shifted more towards positive 
+values compared to the other curves.
+
+* The peak in max views around 200-300 is most pronounced in the french 
+pages (fr, in turquoise).
+
+* The english pages (en, in mustard) have the highest mean and maximum 
+views, which is not surprising.
+
+
+
+
+```{r}
+
+parameters %>%
+  ggplot(aes(max_view-avg_view, avg_view)) +
+  geom_bin2d(bins = c(50,50)) +
+  scale_x_log10() +
+  scale_y_log10() +
+  labs(x = "maximum views above mean", y = "mean views",title =" Distribution of Articles with Maximum view over Mean")
+
+```
+
+
+
+### Insights
+
+* There is a clear correlation between mean views and maximum views. Also 
+here we find again the two cluster peaks we had identified in the individual
+histograms. A couple of outliers and outlier groups are noticeable.
+
+
+
+
+Let’s zoom into the upper right corner (the numbers in parentheses are the row numbers):
+
+```{r}
+
+limx <- c(max(parameters$max_view)/35, max(parameters$max_view))
+limy <- c(max(parameters$avg_view)/35, max(parameters$avg_view))
+par_page %>%
+  ggplot(aes(max_view-avg_view, avg_view)) +
+  geom_point(size = 2, color = "red") +
+  scale_x_log10(limits = limx) +
+  scale_y_log10(limits = limy) +
+  labs(x = "maximum views above mean", y = "mean views") +
+  geom_label_repel(aes(label = str_c(article, " (",rowname,")")), alpha = 0.5)
+
+```
+
+## Individual observations with extreme parameters
+
+Based on the overview parameters we can focus our attention on those
+articles for which the time series parameters are at the extremes of the
+parameter space.
+
+
+### Large linear slope
+
+
+Those are the observations with the highest slope values. 
+
+```{r}
+
+parameters %>% arrange(desc(slope)) %>% head(5) %>% select(rowname, slope, everything())
+
+```
+
+Observing the time series data of the top 4 articles:
+
+```{r}
+
+p1 <- plot_time_series(45049)
+p2 <- plot_time_series(95996)
+p3 <- plot_time_series(54377)
+p4 <- plot_time_series(80276)
+
+
+layout <- matrix(c(1,2,3,4),2,2,byrow=TRUE)
+grid.arrange(p1, p2, p3, p4,top=textGrob("Articles with Increasing View Count"))
+
+
+
+```
+
+
+### Insights
+
+* These are the observed articles with the largest linear slope. 
+
+
+
+
+### Articles with decreasing view counts over the years
+
+
+
+```{r}
+
+parameters %>% arrange(slope) %>% head(5) %>% select(rowname, slope, everything())
+
+```
+
+Those are the observations with the lowest slope values. 
+
+
+
+```{r}
+
+p1 <- plot_time_series(38458)
+p2 <- plot_time_series(75639)
+p3 <- plot_time_series(43899)
+p4 <- plot_time_series(41259)
+
+
+
+layout <- matrix(c(1,2,3,4),2,2,byrow=TRUE)
+grid.arrange(p1, p2, p3, p4,top=textGrob("Articles with Decreasing View Count"))
+
+
+
+```
+
+
+### Insights
+
+* We can observe that the list of Bollywood films of 2015 article has shown a downward trend in view count after the year 2015.
+
+
+
+## High average views
+
+```{r}
+
+parameters %>% arrange(desc(avg_view)) %>% 
+  head(5) %>% select(rowname, max_view, avg_view, everything())
+
+```
+
+Those are the observations with the highest mean view count 
+
+
+
+```{r}
+
+p1 <- plot_time_series(7345)
+p2 <- plot_time_series(86432)
+p3 <- plot_time_series(39173)
+p4 <- plot_time_series(140148)
+
+
+layout <- matrix(c(1,2,3,4),2,2,byrow=TRUE)
+grid.arrange(p1, p2, p3, p4,top=textGrob("Articles with Highest Average View Count"))
+
+
+
+```
+
+
+### Insights
+
+* In addition to the random spikes in these plots there is a suprising
+amount of variability observed.
+
+
+
+
+## Short-term variability
+
+
+
+```{r}
+
+p1 <- plot_time_series_zoom(10404, "2016-10-01", "2016-12-01")
+p2 <- plot_time_series_zoom(9775, "2015-09-01", "2015-11-01")
+p3 <- plot_time_series_zoom(139120, "2016-10-01", "2016-12-01")
+p4 <- plot_time_series_zoom(110658, "2016-07-01", "2016-09-01")
+
+
+layout <- matrix(c(1,2,3,4),2,2,byrow=TRUE)
+grid.arrange(p1, p2, p3, p4,top=textGrob("Exploring Short Term Variability"))
+
+
+
+```
+
+
+### Insights
+
+* We see that the high-view-count time series show a
+very regular periodicity.
+
+These plots provide evidence that there is variability on a weekly scale.
+
+The next figure will visualise this *weekly behaviour* in a different way:
+
+Here we average the variability in the previous plot over the day of the 
+week and then overlay all four time series with different colours on a relative scale.
+
+```{r}
+
+rownr <- 10404
+start <- "2016-10-01"
+end <- "2016-12-01"
+foo1 <- extract_time_series(rownr) %>%
+  filter(dates > ymd(start) & dates < ymd(end)) %>%
+  mutate(dates = wday(dates, label = TRUE)) %>%
+  group_by(dates) %>%
+  summarise(wday_views = mean(views)) %>%
+  mutate(wday_views = wday_views/mean(wday_views)) %>%
+  mutate(id = factor(rownr))
+
+rownr <- 9775
+start <- "2015-09-01"
+end <- "2015-11-01"
+foo2 <- extract_time_series(rownr) %>%
+  filter(dates > ymd(start) & dates < ymd(end)) %>%
+  mutate(dates = wday(dates, label = TRUE)) %>%
+  group_by(dates) %>%
+  summarise(wday_views = mean(views)) %>%
+  mutate(wday_views = wday_views/mean(wday_views)) %>%
+  mutate(id = factor(rownr))
+
+rownr <- 139120
+start <- "2016-10-01"
+end <- "2016-12-01"
+foo3 <- extract_time_series(rownr) %>%
+  filter(dates > ymd(start) & dates < ymd(end)) %>%
+  mutate(dates = wday(dates, label = TRUE)) %>%
+  group_by(dates) %>%
+  summarise(wday_views = mean(views)) %>%
+  mutate(wday_views = wday_views/mean(wday_views)) %>%
+  mutate(id = factor(rownr))
+
+rownr <- 110658
+start <- "2016-07-01"
+end <- "2016-09-01"
+foo4 <- extract_time_series(rownr) %>%
+  filter(dates > ymd(start) & dates < ymd(end)) %>%
+  mutate(dates = wday(dates, label = TRUE)) %>%
+  group_by(dates) %>%
+  summarise(wday_views = mean(views)) %>%
+  mutate(wday_views = wday_views/mean(wday_views)) %>%
+  mutate(id = factor(rownr))
+
+foo <- bind_rows(foo1,foo2,foo3,foo4)
+
+foo %>%
+  ggplot(aes(dates, wday_views, color = id)) +
+  geom_jitter(size = 4, width = 0.1) +
+  labs(x = "Day of the week", y = "Relative average views", title = "Variability on a Weekly Scale")
+
+```
+
+
+
+### Insights
+
+*  We can observe a clear declining trend of the view count from Monday through Friday (weekday) 
+* View count on Weekend is lower than that compared to the Weekdays.
+
+* This gives us valuable information on the general type of variability over
+the course of a week. In order to study this behaviour more in detail, we 
+would need to average over a larger number of time series.
+
+
+
+
+
+
+
+
